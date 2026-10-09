@@ -57,7 +57,7 @@ services:
       echo 'Топики успешно созданы:'
       kafka-topics --bootstrap-server kafka:9092 --list
       "
-  
+
   # Сервис для удобного просмотра топиков и настройки kafka
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -72,6 +72,23 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
 
+  # PostgreSQL: хранит результаты скоринга (витрина scores создаётся из db/init.sql)
+  postgres:
+    image: postgres:16
+    networks:
+      - ml-scorer
+    environment:
+      POSTGRES_DB: fraud_db
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fraud -d fraud_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   fraud_detector:
     build: ./fraud_detector
     networks:
@@ -84,6 +101,25 @@ services:
       - kafka
       - kafka-setup
 
+  # Читает топик scoring и складывает результаты в Postgres
+  scores_writer:
+    build: ./scores_writer
+    networks:
+      - ml-scorer
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_SCORING_TOPIC: "scoring"
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: fraud_db
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
   interface:
     build: ./interface
     networks:
@@ -91,8 +127,15 @@ services:
     environment:
       KAFKA_BROKERS: "kafka:9092"  # Используем внутренний адрес Kafka
       KAFKA_TOPIC: "transactions"
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: fraud_db
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     ports:
       - "8501:8501"
 
